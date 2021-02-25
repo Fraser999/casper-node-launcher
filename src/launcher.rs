@@ -2,7 +2,11 @@
 use std::env;
 #[cfg(test)]
 use std::thread;
-use std::{fs, mem, path::PathBuf, process::Command};
+use std::{
+    fs, mem,
+    path::PathBuf,
+    process::{Command, Stdio},
+};
 
 use anyhow::{bail, Result};
 #[cfg(test)]
@@ -339,7 +343,9 @@ impl Launcher {
                 let mut command = Command::new(&node_info.binary_path);
                 command
                     .arg(VALIDATOR_SUBCOMMAND)
-                    .arg(&node_info.config_path);
+                    .arg(&node_info.config_path)
+                    // TODO - remove this pipe once we're finished supporting delta upgrades.
+                    .stderr(Stdio::piped());
                 let exit_code = utils::run_node(command)?;
                 info!(version=%node_info.version, "finished running node as validator");
                 exit_code

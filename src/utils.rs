@@ -1,4 +1,4 @@
-use std::{fs, path::Path, process::Command, str::FromStr, sync::atomic::Ordering};
+use std::{fs, io::Read, path::Path, process::Command, str::FromStr, sync::atomic::Ordering};
 
 use anyhow::{bail, Error, Result};
 use semver::Version;
@@ -107,17 +107,36 @@ pub fn run_node(mut command: Command) -> Result<NodeExitCode> {
     match exit_status.code() {
         Some(code) if code == NodeExitCode::Success as i32 => {
             debug!("successfully finished running {:?}", command);
-            Ok(NodeExitCode::Success)
+            return Ok(NodeExitCode::Success);
         }
         Some(code) if code == NodeExitCode::ShouldDowngrade as i32 => {
             debug!("finished running {:?} - should downgrade now", command);
-            Ok(NodeExitCode::ShouldDowngrade)
+            return Ok(NodeExitCode::ShouldDowngrade);
         }
         _ => {
             warn!(%exit_status, "failed running {:?}", command);
-            bail!("{:?} exited with error", command);
         }
     }
+
+    // TODO - remove this block once we're finished supporting delta upgrades.
+    if let Some(mut stderr) = child.stderr {
+        let mut error_output = String::new();
+        let _ = stderr
+            .read_to_string(&mut error_output)
+            .unwrap_or_else(|error| {
+                warn!("failed to read child process stderr: {}", error);
+                0
+            });
+        if error_output.contains("Block execution result doesn't match received block.") {
+            debug!(
+                "finished running {:?} with block execution error indicating should upgrade now",
+                command
+            );
+            return Ok(NodeExitCode::Success);
+        }
+    }
+
+    bail!("{:?} exited with error", command)
 }
 
 /// Maps an error to a different type of error, while also logging the error at warn level.
@@ -136,6 +155,8 @@ pub fn map_and_log_error<T, E: std::error::Error + Send + Sync + 'static>(
 
 #[cfg(test)]
 mod tests {
+    use std::process::Stdio;
+
     use super::*;
     use crate::logging;
 
@@ -232,7 +253,9 @@ mod tests {
         // Try a valid binary but use a bad arg to make it exit with a failure.
         let cargo = env!("CARGO");
         command = Command::new(cargo);
-        command.arg("--deliberately-passing-bad-arg-for-test");
+        command
+            .arg("--deliberately-passing-bad-arg-for-test")
+            .stderr(Stdio::piped());
         let error = run_node(command).unwrap_err().to_string();
         assert!(error.ends_with("exited with error"), "{}", error);
     }
@@ -243,7 +266,7 @@ mod tests {
 
         let cargo = env!("CARGO");
         let mut command = Command::new(cargo);
-        command.arg("--version");
+        command.arg("--version").stdout(Stdio::piped());
         assert_eq!(run_node(command).unwrap(), NodeExitCode::Success);
     }
 
@@ -256,5 +279,17 @@ mod tests {
         let mut command = Command::new("sh");
         command.arg(&script_path);
         assert_eq!(run_node(command).unwrap(), NodeExitCode::ShouldDowngrade);
+    }
+
+    // TODO - remove this test and the delta.sh file once we're finished supporting delta upgrades.
+    #[test]
+    fn should_run_command_exiting_with_block_execution_error() {
+        let _ = logging::init();
+
+        let script_path = format!("{}/test_resources/delta.sh", env!("CARGO_MANIFEST_DIR"));
+
+        let mut command = Command::new("sh");
+        command.arg(&script_path).stderr(Stdio::piped());
+        assert_eq!(run_node(command).unwrap(), NodeExitCode::Success);
     }
 }
